@@ -287,34 +287,39 @@ class Config:
             logger.error(f"Error loading config: {e}")
             self._config = {}
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """
-        获取配置值
+def get(self, key: str, default: Any = None) -> Any:
+    """
+    获取配置
 
-        Args:
-            key: 配置键，格式 "section.key"
-            default: 默认值
-        """
-        if "." in key:
-            try:
-                section, attr = key.split(".", 1)
-                return self._config.get(section, {}).get(attr, default)
-            except (ValueError, AttributeError):
-                return default
+    优先级：
+    1. 运行时配置/存储配置
+    2. 环境变量（将 section.key 映射为 SECTION_KEY）
+    3. 默认值
+    """
+    import os
 
-        return self._config.get(key, default)
+    value = default
 
-    async def update(self, new_config: dict):
-        """更新配置"""
-        from app.core.storage import get_storage
+    if "." in key:
+        try:
+            section, attr = key.split(".", 1)
+            value = self._config.get(section, {}).get(attr, default)
+        except (ValueError, AttributeError):
+            value = default
+    else:
+        value = self._config.get(key, default)
 
-        storage = get_storage()
-        async with storage.acquire_lock("config_save", timeout=10):
-            self._ensure_defaults()
-            base = _deep_merge(self._defaults, self._config or {})
-            merged = _deep_merge(base, new_config or {})
-            await storage.save_config(merged)
-            self._config = merged
+    # 配置里已有明确值时，优先用配置
+    if value not in (None, ""):
+        return value
+
+    # 回退读取环境变量：grok.cf_clearance -> GROK_CF_CLEARANCE
+    env_key = key.replace(".", "_").upper()
+    env_val = os.getenv(env_key)
+    if env_val not in (None, ""):
+        return env_val
+
+    return default
 
 
 # 全局配置实例
