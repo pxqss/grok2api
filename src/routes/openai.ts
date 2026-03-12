@@ -1285,6 +1285,19 @@ openAiRoutes.post("/chat/completions", async (c) => {
       return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
 
     const settingsBundle = await getSettings(c.env);
+    await addDebugRequestLog({
+      env: c.env,
+      ip,
+      keyName,
+      model: requestedModel,
+      stage: "settings.loaded",
+      detail: {
+        hasCfClearance: Boolean(normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "")),
+        retryCodes: Array.isArray(settingsBundle.grok.retry_status_codes)
+          ? settingsBundle.grok.retry_status_codes
+          : [401, 429],
+      },
+    });
     const cfg = MODEL_CONFIG[requestedModel]!;
 
     const retryCodes = Array.isArray(settingsBundle.grok.retry_status_codes)
@@ -1308,11 +1321,43 @@ openAiRoutes.post("/chat/completions", async (c) => {
       kind: quotaKind as any,
       ...(cfg.is_image_model ? { imageCount: 2 } : {}),
     });
+    await addDebugRequestLog({
+      env: c.env,
+      ip,
+      keyName,
+      model: requestedModel,
+      stage: quota.ok ? "quota.ok" : "quota.blocked",
+      detail: {
+        quotaKind,
+        isImageModel: Boolean(cfg.is_image_model),
+        isVideoModel: Boolean(cfg.is_video_model),
+      },
+    });
     if (!quota.ok) return quota.resp;
 
     for (let attempt = 0; attempt < maxRetry; attempt++) {
       const chosen = await selectBestToken(c.env.DB, requestedModel);
-      if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+      if (!chosen) {
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          stage: "token.none",
+          detail: { attempt, reason: "selectBestToken returned null" },
+        });
+        return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+      }
+
+      await addDebugRequestLog({
+        env: c.env,
+        ip,
+        keyName,
+        model: requestedModel,
+        tokenSuffix: getTokenSuffix(chosen.token),
+        stage: "token.selected",
+        detail: { attempt, tokenSuffix: getTokenSuffix(chosen.token) },
+      });
 
       const jwt = chosen.token;
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
