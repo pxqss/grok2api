@@ -1095,6 +1095,30 @@ async function recordImageLog(args: {
   });
 }
 
+async function addDebugRequestLog(args: {
+  env: Env;
+  ip: string;
+  keyName: string;
+  model: string;
+  tokenSuffix?: string;
+  stage: string;
+  detail: Record<string, unknown>;
+}) {
+  try {
+    await addRequestLog(args.env.DB, {
+      ip: args.ip,
+      model: `${args.model}#dbg`,
+      duration: 0,
+      status: 299,
+      key_name: args.keyName,
+      token_suffix: args.tokenSuffix ?? "",
+      error: `[${args.stage}] ${JSON.stringify(args.detail).slice(0, 500)}`,
+    });
+  } catch {
+    // ignore debug log failures
+  }
+}
+
 function listImageFiles(form: FormData): File[] {
   return [...form.getAll("image"), ...form.getAll("image[]")].filter(
     (item): item is File => item instanceof File,
@@ -1244,6 +1268,17 @@ openAiRoutes.post("/chat/completions", async (c) => {
         ...summarizeChatMessages(Array.isArray(body.messages) ? body.messages : []),
       }),
     );
+    await addDebugRequestLog({
+      env: c.env,
+      ip,
+      keyName,
+      model: requestedModel || "unknown",
+      stage: "entry",
+      detail: {
+        stream: Boolean(body.stream),
+        ...summarizeChatMessages(Array.isArray(body.messages) ? body.messages : []),
+      },
+    });
     if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
     if (!Array.isArray(body.messages)) return c.json(openAiError("Missing 'messages'", "missing_messages"), 400);
     if (!isValidModel(requestedModel))
@@ -1294,6 +1329,18 @@ openAiRoutes.post("/chat/completions", async (c) => {
           imagesCount: images.length,
         }),
       );
+      await addDebugRequestLog({
+        env: c.env,
+        ip,
+        keyName,
+        model: requestedModel,
+        tokenSuffix: getTokenSuffix(jwt),
+        stage: "extract",
+        detail: {
+          contentPreview: String(content ?? "").slice(0, 160),
+          imagesCount: images.length,
+        },
+      });
       const isVideoModel = Boolean(cfg.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
 
@@ -1307,6 +1354,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
             imgInputsCount: imgInputs.length,
           }),
         );
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          stage: "upload.before",
+          detail: { imgInputsCount: imgInputs.length },
+        });
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
         const imgIds = uploads.map((u) => u.fileId).filter(Boolean);
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
@@ -1320,6 +1376,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
             imgUrisCount: imgUris.length,
           }),
         );
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          stage: "upload.after",
+          detail: { imgIdsCount: imgIds.length, imgUrisCount: imgUris.length },
+        });
 
         let postId: string | undefined;
         if (isVideoModel) {
@@ -1357,6 +1422,19 @@ openAiRoutes.post("/chat/completions", async (c) => {
             hasImages: imgIds.length > 0 || imgUris.length > 0,
           }),
         );
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          stage: "upstream.before",
+          detail: {
+            referer: referer ?? null,
+            hasPayload: Boolean(payload),
+            hasImages: imgIds.length > 0 || imgUris.length > 0,
+          },
+        });
 
         const upstream = await sendConversationRequest({
           payload,
@@ -1375,6 +1453,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
             ok: upstream.ok,
           }),
         );
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          stage: "upstream.status",
+          detail: { status: upstream.status, ok: upstream.ok },
+        });
 
         if (!upstream.ok) {
           const txt = await upstream.text().catch(() => "");
@@ -1388,6 +1475,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
               bodyPreview: txt.slice(0, 300),
             }),
           );
+          await addDebugRequestLog({
+            env: c.env,
+            ip,
+            keyName,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            stage: "upstream.error",
+            detail: { status: upstream.status, bodyPreview: txt.slice(0, 300) },
+          });
           lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
           await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
           await applyCooldown(c.env.DB, jwt, upstream.status);
@@ -1458,6 +1554,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
             error: msg.slice(0, 300),
           }),
         );
+        await addDebugRequestLog({
+          env: c.env,
+          ip,
+          keyName,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          stage: "catch",
+          detail: { error: msg.slice(0, 300) },
+        });
         lastErr = msg;
         await recordTokenFailure(c.env.DB, jwt, 500, msg);
         await applyCooldown(c.env.DB, jwt, 500);
