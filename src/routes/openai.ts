@@ -38,6 +38,32 @@ function getClientIp(req: Request): string {
   );
 }
 
+function summarizeChatMessages(messages: any[]): Record<string, unknown> {
+  const first = Array.isArray(messages) && messages.length > 0 ? messages[0] : null;
+  const content = first?.content;
+  const contentIsArray = Array.isArray(content);
+  const contentTypes = contentIsArray
+    ? content
+        .filter((item: any) => item && typeof item === "object")
+        .map((item: any) => item.type ?? "unknown")
+    : [];
+  const imageUrlCount = contentIsArray
+    ? content.filter((item: any) => item?.type === "image_url").length
+    : 0;
+  const textPreview = contentIsArray
+    ? String(content.find((item: any) => item?.type === "text")?.text ?? "").slice(0, 120)
+    : String(content ?? "").slice(0, 120);
+
+  return {
+    messagesCount: Array.isArray(messages) ? messages.length : 0,
+    firstRole: first?.role ?? null,
+    contentKind: contentIsArray ? "array" : typeof content,
+    contentTypes,
+    imageUrlCount,
+    textPreview,
+  };
+}
+
 async function mapLimit<T, R>(
   items: T[],
   limit: number,
@@ -1208,6 +1234,16 @@ openAiRoutes.post("/chat/completions", async (c) => {
     };
 
     requestedModel = String(body.model ?? "");
+    console.log(
+      "[DBG openai.chat.entry]",
+      JSON.stringify({
+        ip,
+        keyName,
+        model: requestedModel,
+        stream: Boolean(body.stream),
+        ...summarizeChatMessages(Array.isArray(body.messages) ? body.messages : []),
+      }),
+    );
     if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
     if (!Array.isArray(body.messages)) return c.json(openAiError("Missing 'messages'", "missing_messages"), 400);
     if (!isValidModel(requestedModel))
@@ -1248,13 +1284,42 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
       const { content, images } = extractContent(body.messages as any);
+      console.log(
+        "[DBG openai.chat.extract]",
+        JSON.stringify({
+          ip,
+          model: requestedModel,
+          tokenSuffix: getTokenSuffix(jwt),
+          contentPreview: String(content ?? "").slice(0, 160),
+          imagesCount: images.length,
+        }),
+      );
       const isVideoModel = Boolean(cfg.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
 
       try {
+        console.log(
+          "[DBG openai.chat.upload.before]",
+          JSON.stringify({
+            ip,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            imgInputsCount: imgInputs.length,
+          }),
+        );
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
         const imgIds = uploads.map((u) => u.fileId).filter(Boolean);
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
+        console.log(
+          "[DBG openai.chat.upload.after]",
+          JSON.stringify({
+            ip,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            imgIdsCount: imgIds.length,
+            imgUrisCount: imgUris.length,
+          }),
+        );
 
         let postId: string | undefined;
         if (isVideoModel) {
@@ -1281,6 +1346,18 @@ openAiRoutes.post("/chat/completions", async (c) => {
           settings: settingsBundle.grok,
         });
 
+        console.log(
+          "[DBG openai.chat.upstream.before]",
+          JSON.stringify({
+            ip,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            referer: referer ?? null,
+            hasPayload: Boolean(payload),
+            hasImages: imgIds.length > 0 || imgUris.length > 0,
+          }),
+        );
+
         const upstream = await sendConversationRequest({
           payload,
           cookie,
@@ -1288,8 +1365,29 @@ openAiRoutes.post("/chat/completions", async (c) => {
           ...(referer ? { referer } : {}),
         });
 
+        console.log(
+          "[DBG openai.chat.upstream.status]",
+          JSON.stringify({
+            ip,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            status: upstream.status,
+            ok: upstream.ok,
+          }),
+        );
+
         if (!upstream.ok) {
           const txt = await upstream.text().catch(() => "");
+          console.log(
+            "[DBG openai.chat.upstream.error]",
+            JSON.stringify({
+              ip,
+              model: requestedModel,
+              tokenSuffix: getTokenSuffix(jwt),
+              status: upstream.status,
+              bodyPreview: txt.slice(0, 300),
+            }),
+          );
           lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
           await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
           await applyCooldown(c.env.DB, jwt, upstream.status);
@@ -1351,6 +1449,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
         return c.json(json);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        console.log(
+          "[DBG openai.chat.catch]",
+          JSON.stringify({
+            ip,
+            model: requestedModel,
+            tokenSuffix: getTokenSuffix(jwt),
+            error: msg.slice(0, 300),
+          }),
+        );
         lastErr = msg;
         await recordTokenFailure(c.env.DB, jwt, 500, msg);
         await applyCooldown(c.env.DB, jwt, 500);
